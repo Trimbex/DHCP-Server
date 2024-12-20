@@ -22,15 +22,19 @@ class DHCPServer:
     def _initialize_ip_pool(self):
         """Initialize the pool of available IP addresses"""
         ip_pool = []
+        # Generate IPs from 192.168.1.100 to 192.168.1.200
         start = struct.unpack('!I', socket.inet_aton('192.168.1.100'))[0]
         end = struct.unpack('!I', socket.inet_aton('192.168.1.200'))[0]
         
         for ip_int in range(start, end + 1):
             ip = socket.inet_ntoa(struct.pack('!I', ip_int))
             ip_pool.append(ip)
-            
+        
+        # Ensure the pool is sorted
+        ip_pool.sort()
         self.logger.info(f"Initialized IP pool with {len(ip_pool)} addresses")
         return ip_pool
+
 
     def setup_logging(self):
         """Set up logging configuration"""
@@ -151,16 +155,25 @@ class DHCPServer:
             expired_leases = []
             
             for mac_address, lease in list(self.leases.items()):
+                # Check if the lease has expired
                 if current_time - lease['timestamp'] > lease['lease_time']:
-                    expired_leases.append((mac_address, lease['ip']))
+                    expired_leases.append(mac_address)
             
-            for mac_address, ip in expired_leases:
-                if ip not in self.available_addresses:
-                    self.available_addresses.insert(0, ip)
+            for mac_address in expired_leases:
+                # Release the IP and remove the expired lease
+                ip = self.leases[mac_address]['ip']
+                self.available_addresses.append(ip)
+                self.available_addresses.sort()  # Ensure IP pool remains sorted
                 del self.leases[mac_address]
             
+            # Save the updated lease data back to the file
             self._save_leases()
-            time.sleep(1)  # Check every second
+            self.logger.info(f"Expired leases cleaned up. Active leases: {len(self.leases)}")
+            
+            # Wait for the next cleanup cycle
+            time.sleep(2)  # Check every minute
+
+
 
     def _handle_discover(self, address, message_data):
         """Handle DHCP DISCOVER message"""
@@ -171,7 +184,7 @@ class DHCPServer:
             offer_message = {
                 'type': 'OFFER',
                 'ip_address': offered_ip,
-                'lease_time': 10,
+                'lease_time': 15,
                 'server_id': self.server_ip
             }
             
@@ -190,7 +203,7 @@ class DHCPServer:
                 'ip': requested_ip,
                 'mac_address': mac_address,
                 'timestamp': time.time(),
-                'lease_time': 10
+                'lease_time': 15
             }
             
             self.leases[mac_address] = lease
@@ -199,7 +212,7 @@ class DHCPServer:
             ack_message = {
                 'type': 'ACK',
                 'ip_address': requested_ip,
-                'lease_time': 10,
+                'lease_time': 15,
                 'server_id': self.server_ip
             }
             
