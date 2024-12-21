@@ -440,8 +440,8 @@ class DHCPServer:
                 self._handle_discover(address, message_data)
             elif message_data['type'] == 'REQUEST':
                 self._handle_request(address, message_data)
-            elif message_data[type] == 'RELEASE':
-                self._handle_release(address,message_data) #TODO: IMPLEMENT RELEASE TO REMOVE THE JSON FOR THE LEASE
+            elif message_data['type'] == 'RELEASE':
+                self._handle_release(address, message_data)
 
         except Exception as e:
             self.logger.error(f"Error handling client message: {e}")
@@ -473,6 +473,31 @@ class DHCPServer:
             except Exception as e:
                 self.logger.error(f"Error in lease cleanup: {e}")
                 time.sleep(60)  # Wait before retrying
+
+    def _handle_release(self, address, message_data):
+        """Handle DHCP RELEASE message"""
+        mac_address = message_data.get('mac_address')
+        ip_address = message_data.get('ip_address')
+
+        if mac_address in self.leases and self.leases[mac_address]['ip'] == ip_address:
+            del self.leases[mac_address]
+            self.available_addresses.append(ip_address)
+            self.available_addresses.sort()
+            self._save_leases()
+
+            # Remove lease from dhcp_leases.json
+            with open(self.lease_file, 'r') as f:
+                all_leases = json.load(f)
+
+            if mac_address in all_leases:
+                del all_leases[mac_address]
+
+            with open(self.lease_file, 'w') as f:
+                json.dump(all_leases, f, indent=4)
+
+            self.logger.info(f"Released IP {ip_address} for MAC {mac_address}")
+        else:
+            self.logger.warning(f"Invalid release request for IP {ip_address} and MAC {mac_address}")
 
     def _handle_discover(self, address, message_data):
         """Handle DHCP DISCOVER message"""
