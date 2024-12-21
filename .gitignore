@@ -1,4 +1,6 @@
 
-users.json
-dhcp_leases.json
-dhcp_server.log
+*.json
+*.log
+*.xml
+*.iml
+.idea
