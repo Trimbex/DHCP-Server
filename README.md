@@ -165,12 +165,18 @@ sudo iptables -A OUTPUT -p udp --sport 67:68 -j ACCEPT
 
 ## File Structure
 dhcp-server/
-├── server.py # DHCP server implementation
+├── server.py # DHCP server implementation  
+
 ├── client.py # DHCP client implementation
+
 ├── dhcp_config.json # Server configuration
+
 ├── dhcp_leases.json # Active leases
+
 ├── users.json # User credentials
+
 ├── mac_whitelist.json # Authorized MAC addresses
+
 └── logs/ # Server and client logs
 
 
