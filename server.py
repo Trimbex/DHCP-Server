@@ -440,6 +440,8 @@ class DHCPServer:
                 self._handle_discover(address, message_data)
             elif message_data['type'] == 'REQUEST':
                 self._handle_request(address, message_data)
+            elif message_data[type] == 'RELEASE':
+                self._handle_release(address,message_data) #TODO: IMPLEMENT RELEASE TO REMOVE THE JSON FOR THE LEASE
 
         except Exception as e:
             self.logger.error(f"Error handling client message: {e}")

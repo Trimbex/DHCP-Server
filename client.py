@@ -221,12 +221,30 @@ class DHCPClient:
         """Release the current IP lease"""
         if self.leased_ip and self.server_id:
             try:
+                # Create a new socket for release specifically
+                release_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                release_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+                # Don't try to bind to the DHCP client port on Windows
+                # Instead, let the OS assign an ephemeral port
+                if platform.system() != 'Windows':
+                    try:
+                        release_socket.bind(('0.0.0.0', self.client_port))
+                    except Exception as bind_error:
+                        self.logger.warning(f"Could not bind to port {self.client_port}, using ephemeral port")
+                        release_socket.bind(('0.0.0.0', 0))
+                else:
+                    # On Windows, always use an ephemeral port
+                    release_socket.bind(('0.0.0.0', 0))
+
                 release_message = self._create_message(
                     'RELEASE',
                     ip_address=self.leased_ip,
                     server_id=self.server_id
                 )
-                self.sock.sendto(release_message, (self.server_ip, self.server_port))
+
+                # Send the release message
+                release_socket.sendto(release_message, (self.server_ip, self.server_port))
                 self.logger.info(f"Released IP lease for {self.leased_ip}")
 
                 # Clean up lease file
@@ -236,6 +254,13 @@ class DHCPClient:
 
             except Exception as e:
                 self.logger.error(f"Error releasing lease: {e}")
+            finally:
+                try:
+                    release_socket.close()
+                except:
+                    pass
+
+
 def _get_current_mac_address():
     """Retrieve the current MAC address of the machine's active network interface."""
     try:
