@@ -6,6 +6,7 @@ import time
 import logging
 import hashlib
 import os
+import ipaddress 
 from datetime import datetime
 
 
@@ -387,11 +388,13 @@ class DHCPServer:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            self.sock.bind((self.server_ip, self.server_port))
+            # Bind to 0.0.0.0 to listen on all interfaces
+            self.sock.bind(('0.0.0.0', self.server_port))
 
             self.logger.info("=" * 50)
             self.logger.info("DHCP Server Starting")
-            self.logger.info(f"Listening on {self.server_ip}:{self.server_port}")
+            self.logger.info(f"Listening on 0.0.0.0:{self.server_port}")
+            self.logger.info(f"Server IP: {self.server_ip}")
             self.logger.info(f"Available IP addresses: {len(self.available_addresses)}")
             self.logger.info(f"Loaded {len(self.mac_whitelist)} MAC whitelist entries")
             self.logger.info(f"Loaded {len(self.leases)} active leases")
@@ -405,7 +408,7 @@ class DHCPServer:
             # Main server loop
             while True:
                 try:
-                    message, address = self.sock.recvfrom(1024)
+                    message, address = self.sock.recvfrom(4096)  # Increased buffer size
                     client_thread = threading.Thread(
                         target=self._handle_client_message,
                         args=(message, address)
@@ -452,7 +455,7 @@ class DHCPServer:
         # Your IP address
         response[16:20] = socket.inet_aton(yiaddr)
         
-        # Next server IP address (siaddr) - MUST be our server IP
+        # Next server IP address (siaddr)
         response[20:24] = socket.inet_aton(self.server_ip)
         
         # Relay agent IP address
@@ -463,7 +466,7 @@ class DHCPServer:
         response[28:28 + len(mac_bytes)] = mac_bytes
         response[28 + len(mac_bytes):44] = b'\x00' * (16 - len(mac_bytes))
         
-        # Server hostname (optional)
+        # Server hostname
         response[44:108] = b'\x00' * 64
         
         # Boot filename
@@ -473,31 +476,35 @@ class DHCPServer:
         response.extend(bytes([99, 130, 83, 99]))
         
         # DHCP Options
-        # Server Identifier MUST be first and MUST be our actual IP
-        server_id_option = bytes([54, 4]) + socket.inet_aton(self.server_ip)
-        response.extend(server_id_option)
-        
         # Message Type
         response.extend(bytes([53, 1, message_type]))
         
-        # Lease Time
+        # Server Identifier
+        response.extend(bytes([54, 4]) + socket.inet_aton(self.server_ip))
+        
+        # IP Address Lease Time
         response.extend(bytes([51, 4]) + struct.pack('!L', self.config['default_lease_time']))
+        
+        # Renewal Time Value (T1)
+        response.extend(bytes([58, 4]) + struct.pack('!L', self.config['renewal_time']))
+        
+        # Rebinding Time Value (T2)
+        response.extend(bytes([59, 4]) + struct.pack('!L', self.config['rebinding_time']))
         
         # Subnet Mask
         response.extend(bytes([1, 4]) + socket.inet_aton(self.config['subnet_mask']))
         
-        # Router (Gateway)
-        response.extend(bytes([3, 4]) + socket.inet_aton(self.server_ip))  # Use server IP as gateway
+        # Broadcast Address
+        network = ipaddress.IPv4Network(f"{yiaddr}/{self.config['subnet_mask']}", strict=False)
+        broadcast = str(network.broadcast_address)
+        response.extend(bytes([28, 4]) + socket.inet_aton(broadcast))
         
-        # DNS Servers
+        # Router (Gateway)
+        response.extend(bytes([3, 4]) + socket.inet_aton(self.server_ip))
+        
+        # Domain Name Server
         dns_servers = b''.join(socket.inet_aton(dns) for dns in self.config['dns_servers'])
         response.extend(bytes([6, len(dns_servers)]) + dns_servers)
-        
-        # Renewal (T1) Time Value
-        response.extend(bytes([58, 4]) + struct.pack('!L', self.config['renewal_time']))
-        
-        # Rebinding (T2) Time Value
-        response.extend(bytes([59, 4]) + struct.pack('!L', self.config['rebinding_time']))
         
         # End option
         response.extend(bytes([255]))
@@ -506,8 +513,7 @@ class DHCPServer:
         if len(response) < 300:
             response.extend(b'\x00' * (300 - len(response)))
         
-        # Debug print options
-        self._debug_print_options(response)
+        return response
         
         return response
     def _debug_print_options(self, response):
@@ -547,6 +553,11 @@ class DHCPServer:
             
             self.logger.info(f"Client MAC: {client_mac}")
             self.logger.info(f"Client IP: {client_ip}")
+
+            # Verify MAC authorization
+            if not self.is_mac_authorized(client_mac):
+                self.logger.warning(f"Unauthorized MAC address: {client_mac}")
+                return
             
             # Parse DHCP options
             message_type = None
@@ -578,31 +589,41 @@ class DHCPServer:
                 i += option_length + 2
 
             # Handle DISCOVER
-            if message_type == 1:
+            if message_type == 1:  # DHCP DISCOVER
                 self.logger.info(f"Received DISCOVER from {client_mac}")
-                if not self.available_addresses:
+                
+                # Choose IP address to offer
+                offered_ip = None
+                if client_mac in self.leases:
+                    # Offer the same IP if client had a previous lease
+                    offered_ip = self.leases[client_mac]['ip']
+                elif self.available_addresses:
+                    offered_ip = self.available_addresses[0]
+                
+                if offered_ip:
+                    response = self._create_dhcp_response(2, message[4:8], client_mac, offered_ip)
+                    self.sock.sendto(response, ('<broadcast>', self.client_port))
+                    self.logger.info(f"Sent OFFER for {offered_ip} to {client_mac}")
+                else:
                     self.logger.warning("No available IP addresses!")
-                    return
-
-                offered_ip = self.available_addresses[0]
-                response = self._create_dhcp_response(2, message[4:8], client_mac, offered_ip)
-                self.sock.sendto(response, ('<broadcast>', self.client_port))
-                self.logger.info(f"Sent OFFER for {offered_ip} to {client_mac}")
 
             # Handle REQUEST
-            elif message_type == 3:
+            elif message_type == 3:  # DHCP REQUEST
                 self.logger.info(f"Received REQUEST from {client_mac}")
                 
-                # Verify this request is for us
-                if server_id and server_id != self.server_ip:
-                    self.logger.info(f"Request not for us (server_id: {server_id})")
-                    return
-
+                # Determine requested IP
                 if not requested_ip:
-                    requested_ip = client_ip if client_ip != '0.0.0.0' else None
+                    if client_ip != '0.0.0.0':
+                        requested_ip = client_ip
+                    elif client_mac in self.leases:
+                        requested_ip = self.leases[client_mac]['ip']
                 
                 if requested_ip:
-                    # Create lease
+                    # Remove from available addresses if it's still there
+                    if requested_ip in self.available_addresses:
+                        self.available_addresses.remove(requested_ip)
+                    
+                    # Create or update lease
                     lease = {
                         'ip': requested_ip,
                         'mac_address': client_mac,
@@ -612,12 +633,29 @@ class DHCPServer:
                     self.leases[client_mac] = lease
                     self._save_leases()
 
+                    # Send ACK
                     response = self._create_dhcp_response(5, message[4:8], client_mac, requested_ip)
                     self.sock.sendto(response, ('<broadcast>', self.client_port))
                     self.logger.info(f"Sent ACK for {requested_ip} to {client_mac}")
                 else:
+                    # Send NAK if no valid IP found
                     response = self._create_dhcp_response(6, message[4:8], client_mac, '0.0.0.0')
                     self.sock.sendto(response, ('<broadcast>', self.client_port))
+                    self.logger.info(f"Sent NAK to {client_mac} - No valid IP address found")
+
+            # Handle RELEASE
+            elif message_type == 7:  # DHCP RELEASE
+                self.logger.info(f"Processing RELEASE from {client_mac} for IP {client_ip}")
+                if client_mac in self.leases:
+                    released_ip = self.leases[client_mac]['ip']
+                    del self.leases[client_mac]
+                    if released_ip not in self.available_addresses:
+                        self.available_addresses.append(released_ip)
+                        self.available_addresses.sort()
+                    self._save_leases()
+                    self.logger.info(f"Successfully released IP {released_ip} from MAC {client_mac}")
+                else:
+                    self.logger.warning(f"No lease found for MAC {client_mac}")
 
         except Exception as e:
             self.logger.error(f"Error handling client message: {e}")
@@ -766,12 +804,12 @@ class DHCPServer:
         self.logger.info(f"Added new user: {username} with role: {role}")
 
 if __name__ == "__main__":
-    # Use the correct server IP
+    # Use 0.0.0.0 to listen on all interfaces
     SERVER_IP = "192.168.56.1"
     
     print(f"Starting DHCP server on {SERVER_IP}")
     
-    # Create server instance
+    # Create server instance with 0.0.0.0 binding
     server = DHCPServer(server_ip=SERVER_IP)
     
     # Print configuration for verification
