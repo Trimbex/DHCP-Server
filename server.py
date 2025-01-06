@@ -424,7 +424,7 @@ class DHCPServer:
             self.sock.close()
             
     def _create_dhcp_response(self, message_type, xid, client_mac, yiaddr):
-        """Create DHCP response packet with proper formatting for Windows clients"""
+        """Create DHCP response packet specifically formatted for Windows clients"""
         response = bytearray(240)  # Standard DHCP header size
         
         # Basic header fields
@@ -438,24 +438,18 @@ class DHCPServer:
         
         # Seconds elapsed & Broadcast flags
         response[8:10] = b'\x00\x00'
-        response[10:12] = b'\x80\x00'  # Broadcast flag set
+        response[10:12] = b'\x80\x00'  # Broadcast flag set (very important for Windows)
         
-        # Client IP (zeros for new lease)
-        response[12:16] = b'\x00\x00\x00\x00'
-        
-        # Your (client) IP address
-        response[16:20] = socket.inet_aton(yiaddr)
-        
-        # Next server IP address (DHCP server IP)
-        response[20:24] = socket.inet_aton(self.server_ip)
-        
-        # Relay agent IP address
-        response[24:28] = b'\x00\x00\x00\x00'
+        # IP addresses
+        response[12:16] = b'\x00\x00\x00\x00'  # Client IP (zeros for new lease)
+        response[16:20] = socket.inet_aton(yiaddr)  # Your (client) IP address
+        response[20:24] = socket.inet_aton(self.server_ip)  # Next server IP
+        response[24:28] = b'\x00\x00\x00\x00'  # Relay agent IP
         
         # Client MAC address (16 bytes field)
         mac_bytes = bytes.fromhex(client_mac.replace(':', ''))
         response[28:34] = mac_bytes
-        response[34:44] = b'\x00' * 10  # Padding
+        response[34:44] = b'\x00' * 10  # Padding for client hardware address
         
         # Server host name and boot file name (zeroed)
         response[44:236] = b'\x00' * 192
@@ -463,34 +457,48 @@ class DHCPServer:
         # Magic cookie (required for DHCP)
         response.extend(b'\x63\x82\x53\x63')
         
-        # DHCP Message Type
+        # DHCP Options - ordering is important for Windows
+        
+        # Option 53: DHCP Message Type
         response.extend(bytes([53, 1, message_type]))
         
-        # Server Identifier
+        # Option 54: Server Identifier
         response.extend(bytes([54, 4]) + socket.inet_aton(self.server_ip))
         
-        # Lease Time
-        response.extend(bytes([51, 4]) + struct.pack('!L', self.config['default_lease_time']))
+        # Option 51: IP Address Lease Time
+        lease_time = self.config['default_lease_time']
+        response.extend(bytes([51, 4]) + struct.pack('!L', lease_time))
         
-        # Subnet Mask
+        # Option 1: Subnet Mask
         response.extend(bytes([1, 4]) + socket.inet_aton(self.config['subnet_mask']))
         
-        # Broadcast Address
+        # Option 3: Router (Gateway)
+        response.extend(bytes([3, 4]) + socket.inet_aton(self.config['gateway']))
+        
+        # Option 6: Domain Name Server
+        dns_servers = self.config['dns_servers']
+        dns_bytes = b''.join(socket.inet_aton(dns) for dns in dns_servers)
+        response.extend(bytes([6, len(dns_bytes)]) + dns_bytes)
+        
+        # Option 15: Domain Name (optional, but Windows likes it)
+        domain = "local"  # You can change this
+        response.extend(bytes([15, len(domain)]) + domain.encode())
+        
+        # Option 28: Broadcast Address
         network = ipaddress.IPv4Network(f"{yiaddr}/{self.config['subnet_mask']}", strict=False)
         broadcast = str(network.broadcast_address)
         response.extend(bytes([28, 4]) + socket.inet_aton(broadcast))
         
-        # Router (Gateway)
-        response.extend(bytes([3, 4]) + socket.inet_aton(self.config['gateway']))
+        # Option 58: Renewal Time Value (T1)
+        response.extend(bytes([58, 4]) + struct.pack('!L', lease_time // 2))
         
-        # Domain Name Servers
-        dns_option = b''.join(socket.inet_aton(dns) for dns in self.config['dns_servers'])
-        response.extend(bytes([6, len(dns_option)]) + dns_option)
+        # Option 59: Rebinding Time Value (T2)
+        response.extend(bytes([59, 4]) + struct.pack('!L', lease_time * 7 // 8))
         
         # End Option
         response.extend(bytes([255]))
         
-        # Pad to minimum size
+        # Add padding to ensure minimum size
         if len(response) < 300:
             response.extend(b'\x00' * (300 - len(response)))
         
@@ -594,18 +602,16 @@ class DHCPServer:
                     try:
                         response = self._create_dhcp_response(2, message[4:8], client_mac, offered_ip)
                         self.logger.info(f"Created OFFER response: {len(response)} bytes")
-                        self.logger.info(f"Response start: {response[:20].hex()}")
                         
-                        # Try sending with specific broadcast address first
-                        try:
-                            broadcast_addr = '192.168.56.255'  # Broadcast address for your subnet
-                            self.sock.sendto(response, (broadcast_addr, self.client_port))
-                            self.logger.info(f"Sent OFFER using {broadcast_addr} broadcast")
-                        except Exception as e:
-                            self.logger.error(f"Failed to send to 255.255.255.255: {e}")
-                            # Fallback to local broadcast
-                            self.sock.sendto(response, ('<broadcast>', self.client_port))
-                            self.logger.info("Sent OFFER using <broadcast>")
+                        # Send to subnet broadcast address
+                        broadcast_addr = '192.168.56.255'
+                        self.sock.sendto(response, (broadcast_addr, self.client_port))
+                        self.logger.info(f"Sent OFFER to {broadcast_addr}:{self.client_port}")
+                        
+                        # Log the offer details
+                        self.logger.info(f"Offered IP: {offered_ip}")
+                        self.logger.info(f"Server IP: {self.server_ip}")
+                        self.logger.info(f"Client MAC: {client_mac}")
                         
                     except Exception as e:
                         self.logger.error(f"Error sending OFFER: {e}")
