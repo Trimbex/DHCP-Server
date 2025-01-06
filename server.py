@@ -383,19 +383,17 @@ class DHCPServer:
         return False
 
     def start(self):
-        """Start the DHCP server"""
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if hasattr(socket, 'SO_REUSEPORT'):  # Some systems support this
-                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            # Bind to 0.0.0.0 to listen on all interfaces
-            self.sock.bind(('0.0.0.0', self.server_port))
+            
+            # Bind to specific interface instead of 0.0.0.0
+            self.sock.bind((self.server_ip, self.server_port))  # Use server_ip instead of 0.0.0.0
 
             self.logger.info("=" * 50)
             self.logger.info("DHCP Server Starting")
-            self.logger.info(f"Listening on 0.0.0.0:{self.server_port}")
+            self.logger.info(f"Listening on {self.server_ip}:{self.server_port}")
             self.logger.info(f"Server IP: {self.server_ip}")
             self.logger.info(f"Available IP addresses: {len(self.available_addresses)}")
             self.logger.info(f"Loaded {len(self.mac_whitelist)} MAC whitelist entries")
@@ -600,8 +598,9 @@ class DHCPServer:
                         
                         # Try sending with specific broadcast address first
                         try:
-                            self.sock.sendto(response, ('255.255.255.255', self.client_port))
-                            self.logger.info("Sent OFFER using 255.255.255.255 broadcast")
+                            broadcast_addr = '192.168.56.255'  # Broadcast address for your subnet
+                            self.sock.sendto(response, (broadcast_addr, self.client_port))
+                            self.logger.info(f"Sent OFFER using {broadcast_addr} broadcast")
                         except Exception as e:
                             self.logger.error(f"Failed to send to 255.255.255.255: {e}")
                             # Fallback to local broadcast
