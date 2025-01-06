@@ -424,86 +424,96 @@ class DHCPServer:
             self.sock.close()
             
     def _create_dhcp_response(self, message_type, xid, client_mac, yiaddr):
-        """Create DHCP response packet specifically formatted for Windows clients"""
-        response = bytearray(240)  # Standard DHCP header size
-        
-        # Basic header fields
-        response[0] = 2    # Message type (Boot Reply)
-        response[1] = 1    # Hardware type (Ethernet)
-        response[2] = 6    # Hardware address length
-        response[3] = 0    # Hops
-        
-        # Transaction ID (same as request)
+        """Create DHCP response packet"""
+        self.logger.debug(f"Creating DHCP response: type={message_type}, server_ip={self.server_ip}")
+        response = bytearray(240)
+
+        # Message type (Boot Reply)
+        response[0] = 2
+
+        # Hardware type (Ethernet)
+        response[1] = 1
+
+        # Hardware address length
+        response[2] = 6
+
+        # Hops
+        response[3] = 0
+
+        # Transaction ID
         response[4:8] = xid
-        
-        # Seconds elapsed & Broadcast flags
+
+        # Seconds elapsed
         response[8:10] = b'\x00\x00'
-        response[10:12] = b'\x80\x00'  # Broadcast flag set (very important for Windows)
-        
-        # IP addresses
-        response[12:16] = b'\x00\x00\x00\x00'  # Client IP (zeros for new lease)
-        response[16:20] = socket.inet_aton(yiaddr)  # Your (client) IP address
-        response[20:24] = socket.inet_aton(self.server_ip)  # Next server IP
-        response[24:28] = b'\x00\x00\x00\x00'  # Relay agent IP
-        
-        # Client MAC address (16 bytes field)
+
+        # Bootp flags (Unicast by default)
+        response[10:12] = b'\x00\x00'
+
+        # Client IP address
+        response[12:16] = socket.inet_aton('0.0.0.0')
+
+        # Your IP address
+        response[16:20] = socket.inet_aton(yiaddr)
+
+        # Next server IP address (siaddr)
+        response[20:24] = socket.inet_aton(self.server_ip)
+
+        # Relay agent IP address
+        response[24:28] = socket.inet_aton('0.0.0.0')
+
+        # Client MAC address
         mac_bytes = bytes.fromhex(client_mac.replace(':', ''))
-        response[28:34] = mac_bytes
-        response[34:44] = b'\x00' * 10  # Padding for client hardware address
-        
-        # Server host name and boot file name (zeroed)
-        response[44:236] = b'\x00' * 192
-        
-        # Magic cookie (required for DHCP)
-        response.extend(b'\x63\x82\x53\x63')
-        
-        # DHCP Options - ordering is important for Windows
-        
-        # Option 53: DHCP Message Type
+        response[28:28 + len(mac_bytes)] = mac_bytes
+        response[28 + len(mac_bytes):44] = b'\x00' * (16 - len(mac_bytes))
+
+        # Server hostname
+        response[44:108] = b'\x00' * 64
+
+        # Boot filename
+        response[108:236] = b'\x00' * 128
+
+        # Magic cookie
+        response[236:240] = bytes([99, 130, 83, 99])
+
+        # DHCP Options
+        # Message Type
         response.extend(bytes([53, 1, message_type]))
-        
-        # Option 54: Server Identifier
+
+        # Server Identifier
         response.extend(bytes([54, 4]) + socket.inet_aton(self.server_ip))
-        
-        # Option 51: IP Address Lease Time
-        lease_time = self.config['default_lease_time']
-        response.extend(bytes([51, 4]) + struct.pack('!L', lease_time))
-        
-        # Option 1: Subnet Mask
+
+        # IP Address Lease Time
+        response.extend(bytes([51, 4]) + struct.pack('!L', self.config['default_lease_time']))
+
+        # Renewal Time Value (T1)
+        response.extend(bytes([58, 4]) + struct.pack('!L', self.config['renewal_time']))
+
+        # Rebinding Time Value (T2)
+        response.extend(bytes([59, 4]) + struct.pack('!L', self.config['rebinding_time']))
+
+        # Subnet Mask
         response.extend(bytes([1, 4]) + socket.inet_aton(self.config['subnet_mask']))
-        
-        # Option 3: Router (Gateway)
-        response.extend(bytes([3, 4]) + socket.inet_aton(self.config['gateway']))
-        
-        # Option 6: Domain Name Server
-        dns_servers = self.config['dns_servers']
-        dns_bytes = b''.join(socket.inet_aton(dns) for dns in dns_servers)
-        response.extend(bytes([6, len(dns_bytes)]) + dns_bytes)
-        
-        # Option 15: Domain Name (optional, but Windows likes it)
-        domain = "local"  # You can change this
-        response.extend(bytes([15, len(domain)]) + domain.encode())
-        
-        # Option 28: Broadcast Address
+
+        # Broadcast Address
         network = ipaddress.IPv4Network(f"{yiaddr}/{self.config['subnet_mask']}", strict=False)
         broadcast = str(network.broadcast_address)
         response.extend(bytes([28, 4]) + socket.inet_aton(broadcast))
-        
-        # Option 58: Renewal Time Value (T1)
-        response.extend(bytes([58, 4]) + struct.pack('!L', lease_time // 2))
-        
-        # Option 59: Rebinding Time Value (T2)
-        response.extend(bytes([59, 4]) + struct.pack('!L', lease_time * 7 // 8))
-        
-        # End Option
+
+        # Router (Gateway)
+        response.extend(bytes([3, 4]) + socket.inet_aton(self.server_ip))
+
+        # Domain Name Server
+        dns_servers = b''.join(socket.inet_aton(dns) for dns in self.config['dns_servers'])
+        response.extend(bytes([6, len(dns_servers)]) + dns_servers)
+
+        # End option
         response.extend(bytes([255]))
-        
-        # Add padding to ensure minimum size
+
+        # Add padding
         if len(response) < 300:
             response.extend(b'\x00' * (300 - len(response)))
-        
-        return response
-        
+
+        self.logger.debug(f"Full DHCP response: {response.hex()}")
         return response
     def _debug_print_options(self, response):
         """Debug method to print DHCP options"""
