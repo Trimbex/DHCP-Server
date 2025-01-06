@@ -618,7 +618,55 @@ class DHCPServer:
                 else:
                     self.logger.warning("No available IP addresses!")
 
-            # Rest of the message handling...
+            # Handle REQUEST
+            elif message_type == 3:  # DHCP REQUEST
+                self.logger.info(f"Received REQUEST from {client_mac}")
+                
+                # Determine requested IP
+                if not requested_ip:
+                    if client_ip != '0.0.0.0':
+                        requested_ip = client_ip
+                    elif client_mac in self.leases:
+                        requested_ip = self.leases[client_mac]['ip']
+                
+                if requested_ip:
+                    # Remove from available addresses if it's still there
+                    if requested_ip in self.available_addresses:
+                        self.available_addresses.remove(requested_ip)
+                    
+                    # Create or update lease
+                    lease = {
+                        'ip': requested_ip,
+                        'mac_address': client_mac,
+                        'timestamp': time.time(),
+                        'lease_time': self.config['default_lease_time']
+                    }
+                    self.leases[client_mac] = lease
+                    self._save_leases()
+
+                    # Send ACK
+                    response = self._create_dhcp_response(5, message[4:8], client_mac, requested_ip)
+                    self.sock.sendto(response, ('<broadcast>', self.client_port))
+                    self.logger.info(f"Sent ACK for {requested_ip} to {client_mac}")
+                else:
+                    # Send NAK if no valid IP found
+                    response = self._create_dhcp_response(6, message[4:8], client_mac, '0.0.0.0')
+                    self.sock.sendto(response, ('<broadcast>', self.client_port))
+                    self.logger.info(f"Sent NAK to {client_mac} - No valid IP address found")
+
+            # Handle RELEASE
+            elif message_type == 7:  # DHCP RELEASE
+                self.logger.info(f"Processing RELEASE from {client_mac} for IP {client_ip}")
+                if client_mac in self.leases:
+                    released_ip = self.leases[client_mac]['ip']
+                    del self.leases[client_mac]
+                    if released_ip not in self.available_addresses:
+                        self.available_addresses.append(released_ip)
+                        self.available_addresses.sort()
+                    self._save_leases()
+                    self.logger.info(f"Successfully released IP {released_ip} from MAC {client_mac}")
+                else:
+                    self.logger.warning(f"No lease found for MAC {client_mac}")
             
         except Exception as e:
             self.logger.error(f"Error handling client message: {e}")
