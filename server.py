@@ -201,12 +201,11 @@ class AdminInterface:
 
 
 class DHCPServer:
-    def __init__(self, server_ip='0.0.0.0', server_port=67, client_port=68):
-        # Server network configuration
+    def __init__(self, server_ip='192.168.56.1', server_port=67, client_port=68):
         self.server_ip = server_ip
         self.server_port = server_port
         self.client_port = client_port
-
+        
         # File paths for persistence
         self.lease_file = 'dhcp_leases.json'
         self.auth_file = 'users.json'
@@ -215,26 +214,26 @@ class DHCPServer:
 
         # Initialize logging
         self.setup_logging()
-
+        
         # Load configurations
         self._load_config()
-
+        
         # Initialize core components
         self.available_addresses = self._initialize_ip_pool()
         self._initialize_database()
         self._load_users()
         self._load_mac_whitelist()
-
+        
         # Track active sessions
         self.active_sessions = {}
 
     def _load_config(self):
         """Load or create server configuration"""
         default_config = {
-            "ip_range_start": "192.168.1.100",
-            "ip_range_end": "192.168.1.200",
+            "ip_range_start": "192.168.56.100",
+            "ip_range_end": "192.168.56.200",
             "subnet_mask": "255.255.255.0",
-            "gateway": "192.168.1.1",
+            "gateway": "192.168.56.1",
             "dns_servers": ["8.8.8.8", "8.8.4.4"],
             "default_lease_time": 3600,  # 1 hour
             "max_lease_time": 86400,     # 24 hours
@@ -327,8 +326,14 @@ class DHCPServer:
     def _save_leases(self):
         """Save lease information to JSON file"""
         try:
-            with open(self.lease_file, 'w') as f:
+            # First write to a temporary file
+            temp_file = f"{self.lease_file}.tmp"
+            with open(temp_file, 'w') as f:
                 json.dump(self.leases, f, indent=4)
+            
+            # Then rename it to the actual file (atomic operation)
+            os.replace(temp_file, self.lease_file)
+            self.logger.debug("Leases saved successfully")
         except Exception as e:
             self.logger.error(f"Error saving leases: {e}")
 
@@ -414,37 +419,220 @@ class DHCPServer:
             self.logger.error(f"Fatal server error: {e}")
         finally:
             self.sock.close()
-
+            
+    def _create_dhcp_response(self, message_type, xid, client_mac, yiaddr):
+        """Create DHCP response packet"""
+        self.logger.debug(f"Creating DHCP response: type={message_type}, server_ip={self.server_ip}")
+        response = bytearray(240)
+        
+        # Message type (Boot Reply)
+        response[0] = 2
+        
+        # Hardware type (Ethernet)
+        response[1] = 1
+        
+        # Hardware address length
+        response[2] = 6
+        
+        # Hops
+        response[3] = 0
+        
+        # Transaction ID
+        response[4:8] = xid
+        
+        # Seconds elapsed
+        response[8:10] = b'\x00\x00'
+        
+        # Bootp flags (Broadcast)
+        response[10:12] = b'\x80\x00'
+        
+        # Client IP address
+        response[12:16] = socket.inet_aton('0.0.0.0')
+        
+        # Your IP address
+        response[16:20] = socket.inet_aton(yiaddr)
+        
+        # Next server IP address (siaddr) - MUST be our server IP
+        response[20:24] = socket.inet_aton(self.server_ip)
+        
+        # Relay agent IP address
+        response[24:28] = socket.inet_aton('0.0.0.0')
+        
+        # Client MAC address
+        mac_bytes = bytes.fromhex(client_mac.replace(':', ''))
+        response[28:28 + len(mac_bytes)] = mac_bytes
+        response[28 + len(mac_bytes):44] = b'\x00' * (16 - len(mac_bytes))
+        
+        # Server hostname (optional)
+        response[44:108] = b'\x00' * 64
+        
+        # Boot filename
+        response[108:236] = b'\x00' * 128
+        
+        # Magic cookie
+        response.extend(bytes([99, 130, 83, 99]))
+        
+        # DHCP Options
+        # Server Identifier MUST be first and MUST be our actual IP
+        server_id_option = bytes([54, 4]) + socket.inet_aton(self.server_ip)
+        response.extend(server_id_option)
+        
+        # Message Type
+        response.extend(bytes([53, 1, message_type]))
+        
+        # Lease Time
+        response.extend(bytes([51, 4]) + struct.pack('!L', self.config['default_lease_time']))
+        
+        # Subnet Mask
+        response.extend(bytes([1, 4]) + socket.inet_aton(self.config['subnet_mask']))
+        
+        # Router (Gateway)
+        response.extend(bytes([3, 4]) + socket.inet_aton(self.server_ip))  # Use server IP as gateway
+        
+        # DNS Servers
+        dns_servers = b''.join(socket.inet_aton(dns) for dns in self.config['dns_servers'])
+        response.extend(bytes([6, len(dns_servers)]) + dns_servers)
+        
+        # Renewal (T1) Time Value
+        response.extend(bytes([58, 4]) + struct.pack('!L', self.config['renewal_time']))
+        
+        # Rebinding (T2) Time Value
+        response.extend(bytes([59, 4]) + struct.pack('!L', self.config['rebinding_time']))
+        
+        # End option
+        response.extend(bytes([255]))
+        
+        # Add padding
+        if len(response) < 300:
+            response.extend(b'\x00' * (300 - len(response)))
+        
+        # Debug print options
+        self._debug_print_options(response)
+        
+        return response
+    def _debug_print_options(self, response):
+        """Debug method to print DHCP options"""
+        i = 240  # Start of options after magic cookie
+        self.logger.debug("DHCP Options being sent:")
+        while i < len(response):
+            if response[i] == 255:  # End option
+                break
+            if response[i] == 0:  # Padding
+                i += 1
+                continue
+            
+            option_type = response[i]
+            option_length = response[i + 1]
+            option_data = response[i + 2:i + 2 + option_length]
+            
+            if option_type == 54:  # Server Identifier
+                self.logger.debug(f"Server Identifier: {socket.inet_ntoa(option_data)}")
+            elif option_type == 53:  # Message Type
+                self.logger.debug(f"Message Type: {option_data[0]}")
+            
+            i += option_length + 2
     def _handle_client_message(self, message, address):
-        """Handle incoming client messages"""
         try:
-            message_data = eval(message.decode())  # Note: In production, use proper parsing
-            self.logger.info(f"Processing {message_data['type']} from {address}")
-
-            # Verify MAC authorization
-            mac_address = message_data.get('mac_address')
-            if not self.is_mac_authorized(mac_address):
-                self.logger.warning(f"Unauthorized MAC address: {mac_address}")
+            self.logger.info(f"Received message from {address}")
+            
+            if len(message) < 240:
+                self.logger.error("Message too short to be a valid DHCP packet")
                 return
 
-            # Verify user authentication
-            if not self.authenticate_user(
-                    message_data.get('username'),
-                    message_data.get('password')
-            ):
-                self.logger.warning(f"Authentication failed for {address}")
-                return
+            # Extract client MAC address
+            client_mac = ':'.join('%02x' % b for b in message[28:34])
+            
+            # Extract client IP address (ciaddr field)
+            client_ip = socket.inet_ntoa(message[12:16])
+            
+            self.logger.info(f"Client MAC: {client_mac}")
+            self.logger.info(f"Client IP: {client_ip}")
+            
+            # Parse DHCP options
+            message_type = None
+            requested_ip = None
+            server_id = None
+            
+            i = 240  # Start of options
+            while i < len(message):
+                if message[i] == 255:  # End option
+                    break
+                if message[i] == 0:  # Padding
+                    i += 1
+                    continue
+                
+                option_type = message[i]
+                option_length = message[i + 1]
+                option_data = message[i + 2:i + 2 + option_length]
+                
+                if option_type == 53:  # Message Type
+                    message_type = option_data[0]
+                    self.logger.info(f"DHCP Message Type: {message_type}")
+                elif option_type == 54:  # Server Identifier
+                    server_id = socket.inet_ntoa(option_data)
+                    self.logger.info(f"Server Identifier in request: {server_id}")
+                elif option_type == 50:  # Requested IP Address
+                    requested_ip = socket.inet_ntoa(option_data)
+                    self.logger.info(f"Requested IP: {requested_ip}")
+                
+                i += option_length + 2
 
-            # Handle message based on type
-            if message_data['type'] == 'DISCOVER':
-                self._handle_discover(address, message_data)
-            elif message_data['type'] == 'REQUEST':
-                self._handle_request(address, message_data)
-            elif message_data['type'] == 'RELEASE':
-                self._handle_release(address, message_data)
+            # Handle DISCOVER
+            if message_type == 1:
+                self.logger.info(f"Received DISCOVER from {client_mac}")
+                if not self.available_addresses:
+                    self.logger.warning("No available IP addresses!")
+                    return
+
+                offered_ip = self.available_addresses[0]
+                response = self._create_dhcp_response(2, message[4:8], client_mac, offered_ip)
+                self.sock.sendto(response, ('<broadcast>', self.client_port))
+                self.logger.info(f"Sent OFFER for {offered_ip} to {client_mac}")
+
+            # Handle REQUEST
+            elif message_type == 3:
+                self.logger.info(f"Received REQUEST from {client_mac}")
+                
+                # Verify this request is for us
+                if server_id and server_id != self.server_ip:
+                    self.logger.info(f"Request not for us (server_id: {server_id})")
+                    return
+
+                if not requested_ip:
+                    requested_ip = client_ip if client_ip != '0.0.0.0' else None
+                
+                if requested_ip:
+                    # Create lease
+                    lease = {
+                        'ip': requested_ip,
+                        'mac_address': client_mac,
+                        'timestamp': time.time(),
+                        'lease_time': self.config['default_lease_time']
+                    }
+                    self.leases[client_mac] = lease
+                    self._save_leases()
+
+                    response = self._create_dhcp_response(5, message[4:8], client_mac, requested_ip)
+                    self.sock.sendto(response, ('<broadcast>', self.client_port))
+                    self.logger.info(f"Sent ACK for {requested_ip} to {client_mac}")
+                else:
+                    response = self._create_dhcp_response(6, message[4:8], client_mac, '0.0.0.0')
+                    self.sock.sendto(response, ('<broadcast>', self.client_port))
 
         except Exception as e:
             self.logger.error(f"Error handling client message: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+    def _is_ip_in_range(self, ip):
+        """Check if an IP address is within the configured range"""
+        try:
+            ip_addr = struct.unpack('!I', socket.inet_aton(ip))[0]
+            start_addr = struct.unpack('!I', socket.inet_aton(self.config['ip_range_start']))[0]
+            end_addr = struct.unpack('!I', socket.inet_aton(self.config['ip_range_end']))[0]
+            return start_addr <= ip_addr <= end_addr
+        except Exception:
+            return False
 
     def _cleanup_expired_leases(self):
         """Periodically clean up expired leases"""
@@ -578,7 +766,22 @@ class DHCPServer:
         self.logger.info(f"Added new user: {username} with role: {role}")
 
 if __name__ == "__main__":
-    server = DHCPServer()
+    # Use the correct server IP
+    SERVER_IP = "192.168.56.1"
+    
+    print(f"Starting DHCP server on {SERVER_IP}")
+    
+    # Create server instance
+    server = DHCPServer(server_ip=SERVER_IP)
+    
+    # Print configuration for verification
+    print("\nServer Configuration:")
+    print(f"Server IP: {SERVER_IP}")
+    print(f"IP Range: {server.config['ip_range_start']} - {server.config['ip_range_end']}")
+    print(f"Subnet Mask: {server.config['subnet_mask']}")
+    print(f"Gateway: {server.config['gateway']}")
+    print(f"DNS Servers: {server.config['dns_servers']}")
+    
     admin_interface = AdminInterface(server)
 
     # Start DHCP server in a separate thread
@@ -591,4 +794,5 @@ if __name__ == "__main__":
         admin_interface.start()
     except KeyboardInterrupt:
         print("\nShutting down DHCP server...")
-        exit(0)
+    finally:
+        print("Server shutdown complete")
